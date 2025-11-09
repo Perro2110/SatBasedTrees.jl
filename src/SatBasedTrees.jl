@@ -82,6 +82,11 @@ correttamente tutti i punti di training
 function solveMinDepthOptimalDT(features_train, labels_train, max_depth_limit = 10)
     max_r, max_c = size(features_train)
     unique_labels = unique(labels_train)
+    n_labels = length(unique_labels)
+
+    # Crea mappatura label -> indice intero
+    label_to_idx = Dict(label => idx for (idx, label) in enumerate(unique_labels))
+    idx_to_label = Dict(idx => label for (idx, label) in enumerate(unique_labels))
 
     # Prova profondità crescenti finché non trova una soluzione
     for depth = 1:max_depth_limit
@@ -96,134 +101,112 @@ function solveMinDepthOptimalDT(features_train, labels_train, max_depth_limit = 
         Al = computeLeftAncestors(t, leaves)
         Ar = computeRightAncestors(t, leaves)
 
+        # Raccogli gli ID dei nodi interni e delle foglie
+        internal_node_ids = [node.t for (node_id, node) in t if node.leaf == false]
+        leaf_ids = [leaf.t for leaf in leaves]
+
         # Crea variabili SAT
-        a = Dict{Tuple{Int,Int},BoolExpr}()
-        s = Dict{Tuple{Int,Int},BoolExpr}()
-        z = Dict{Tuple{Int,Int},BoolExpr}()
-        g = Dict{Tuple{Int,String},BoolExpr}()
-
-        # Variabili a(t,j) - feature selection per nodi interni
-        f = 1:max_c
-        for (node_id, node) in t
-            if node.leaf == false
-                for j in f
-                    a[(node.t, j)] = @satvariable(b, Bool)
-                end
-            end
-        end
-
-        # Variabili s(i,t) - direzione dei punti per nodi interni
-        for ind = 1:max_r
-            for (node_id, node) in t
-                if node.leaf == false
-                    s[(ind, node.t)] = @satvariable(b, Bool)
-                end
-            end
-        end
-
-        # Variabili z(i,t) - assegnamento alle foglie
-        for ind = 1:max_r
-            for leaf in leaves
-                z[(ind, leaf.t)] = @satvariable(b, Bool)
-            end
-        end
-
-        # Variabili g(t,c) - etichette delle foglie
-        for c in unique_labels
-            for leaf in leaves
-                g[(leaf.t, c)] = @satvariable(b, Bool)
-            end
-        end
+        @satvariable(a[internal_node_ids, 1:max_c], Bool)
+        @satvariable(s[1:max_r, internal_node_ids], Bool)
+        @satvariable(z[1:max_r, leaf_ids], Bool)
+        @satvariable(g[leaf_ids, 1:n_labels], Bool)  # Usa indici interi per le label
 
         # Raccoglie tutte le clausole
         clauses = BoolExpr[]
 
         # Clausole per ogni nodo interno
-        for (node_id, node) in t
-            if node.leaf == false
-                # Clausola 1 & 2: Esattamente una feature per nodo
-                feature_vars = [a[(node.t, j)] for j in f]
+        for node_t in internal_node_ids
+            # Clausola 1 & 2: Esattamente una feature per nodo
+            feature_vars = [a[node_t, j] for j in 1:max_c]
 
-                # Almeno una feature
-                push!(clauses, reduce(∨, feature_vars))
+            # Almeno una feature
+            push!(clauses, reduce(∨, feature_vars))
 
-                # Al massimo una feature (pairwise constraints)
-                for i = 1:length(feature_vars)
-                    for j = (i+1):length(feature_vars)
-                        push!(clauses, ¬feature_vars[i] ∨ ¬feature_vars[j])
+            # Al massimo una feature (pairwise constraints)
+            for i = 1:length(feature_vars)
+                for j = (i+1):length(feature_vars)
+                    push!(clauses, ¬feature_vars[i] ∨ ¬feature_vars[j])
+                end
+            end
+
+            for j in 1:max_c
+                # Ordina i punti per la feature j
+                sorted_indices = sortperm(features_train[:, j])
+                ba = a[node_t, j]
+
+                # Clausola 3: Ordinamento coerente per coppie consecutive
+                for i = 2:length(sorted_indices)
+                    curr_idx = sorted_indices[i]
+                    prev_idx = sorted_indices[i-1]
+                    bs_curr = s[curr_idx, node_t]
+                    bs_prev = s[prev_idx, node_t]
+
+                    # Se feature j è selezionata e i valori sono diversi,
+                    # allora il precedente deve andare a sinistra se il corrente va a sinistra
+                    if features_train[prev_idx, j] != features_train[curr_idx, j]
+                        push!(clauses, ¬ba ∨ bs_prev ∨ ¬bs_curr)
+                    else
+                        # Clausola 4: Valori uguali vanno nella stessa direzione
+                        push!(clauses, ¬ba ∨ ¬bs_prev ∨ bs_curr)
+                        push!(clauses, ¬ba ∨ bs_prev ∨ ¬bs_curr)
                     end
                 end
 
-                for j in f
-                    # Ordina i punti per la feature j
-                    sorted_indices = sortperm(features_train[:, j])
-                    ba = a[(node.t, j)]
+                # Clausola 9: Il primo elemento va a sinistra
+                if !isempty(sorted_indices)
+                    first_idx = sorted_indices[1]
+                    bs_first = s[first_idx, node_t]
+                    push!(clauses, ¬ba ∨ bs_first)
 
-                    # Clausola 3: Ordinamento coerente per coppie consecutive
-                    for i = 2:length(sorted_indices)
-                        curr_idx = sorted_indices[i]
-                        prev_idx = sorted_indices[i-1]
-                        bs_curr = s[(curr_idx, node.t)]
-                        bs_prev = s[(prev_idx, node.t)]
-
-                        # Se feature j è selezionata e i valori sono diversi,
-                        # allora il precedente deve andare a sinistra se il corrente va a sinistra
-                        if features_train[prev_idx, j] != features_train[curr_idx, j]
-                            push!(clauses, ¬ba ∨ bs_prev ∨ ¬bs_curr)
-                        else
-                            # Clausola 4: Valori uguali vanno nella stessa direzione
-                            push!(clauses, ¬ba ∨ ¬bs_prev ∨ bs_curr)
-                            push!(clauses, ¬ba ∨ bs_prev ∨ ¬bs_curr)
-                        end
-                    end
-
-                    # Clausola 9: Il primo elemento va a sinistra
-                    if !isempty(sorted_indices)
-                        first_idx = sorted_indices[1]
-                        bs_first = s[(first_idx, node.t)]
-                        push!(clauses, ¬ba ∨ bs_first)
-
-                        # Clausola 10: L'ultimo elemento va a destra
-                        last_idx = sorted_indices[end]
-                        bs_last = s[(last_idx, node.t)]
-                        push!(clauses, ¬ba ∨ ¬bs_last)
-                    end
+                    # Clausola 10: L'ultimo elemento va a destra
+                    last_idx = sorted_indices[end]
+                    bs_last = s[last_idx, node_t]
+                    push!(clauses, ¬ba ∨ ¬bs_last)
                 end
             end
         end
 
         # Clausole per le foglie
-        for leaf in leaves
+
+        for leaf_t in leaf_ids
+            #@show leaf_ids
             # Clausola 5: Percorso sinistro
-            for p in Al[leaf.t]
+            # ll = indice della prima foglia nella lista delle foglie
+            ll = leaf_t - 2^(depth) + 1
+            for p in Al[leaf_t]
                 for ind = 1:max_r
-                    bs = s[(ind, p)]
-                    bz = z[(ind, leaf.t)]
+                    bs = s[ind, p]
+                    #@show ll
+                    bz = z[ind, ll]
                     push!(clauses, ¬bz ∨ bs)
                 end
             end
 
             # Clausola 6: Percorso destro
-            for p in Ar[leaf.t]
+            for p in Ar[leaf_t]
                 for ind = 1:max_r
-                    bs = s[(ind, p)]
-                    bz = z[(ind, leaf.t)]
+                    #@show max_r
+                    #@show leaf_t
+                    bs = s[ind, p]
+                    bz = z[ind, ll]
                     push!(clauses, ¬bz ∨ ¬bs)
                 end
             end
 
+
             # Clausola 7: Definizione di percorso completo
             for ind = 1:max_r
-                left_ancestors = Al[leaf.t]
-                right_ancestors = Ar[leaf.t]
-                bz = z[(ind, leaf.t)]
+
+                left_ancestors = Al[leaf_t]
+                right_ancestors = Ar[leaf_t]
+                bz = z[ind, ll]
 
                 violations = BoolExpr[]
                 for p in left_ancestors
-                    push!(violations, ¬s[(ind, p)])
+                    push!(violations, ¬s[ind, p])
                 end
                 for p in right_ancestors
-                    push!(violations, s[(ind, p)])
+                    push!(violations, s[ind, p])
                 end
 
                 if !isempty(violations)
@@ -232,7 +215,8 @@ function solveMinDepthOptimalDT(features_train, labels_train, max_depth_limit = 
             end
 
             # Clausola 8: Al massimo una etichetta per foglia
-            label_vars = [g[(leaf.t, c)] for c in unique_labels]
+
+            label_vars = [g[ll, c_idx] for c_idx in 1:n_labels]
             for i = 1:length(label_vars)
                 for j = (i+1):length(label_vars)
                     push!(clauses, ¬label_vars[i] ∨ ¬label_vars[j])
@@ -242,17 +226,17 @@ function solveMinDepthOptimalDT(features_train, labels_train, max_depth_limit = 
             # Clausola 11: Classificazione corretta (Min-Depth)
             for ind = 1:max_r
                 correct_label = labels_train[ind]
-                bz = z[(ind, leaf.t)]
-                if haskey(g, (leaf.t, correct_label))
-                    bg = g[(leaf.t, correct_label)]
-                    push!(clauses, ¬bz ∨ bg)
-                end
+                correct_label_idx = label_to_idx[correct_label]  # Converti label a indice
+                bz = z[ind, ll]
+                bg = g[ll, correct_label_idx]
+                push!(clauses, ¬bz ∨ bg)
             end
         end
 
         # Ogni punto deve finire esattamente in una foglia
         for ind = 1:max_r
-            leaf_vars = [z[(ind, leaf.t)] for leaf in leaves]
+
+            leaf_vars = [z[ind, a] for a in 1:length(leaf_ids)]
 
             # Almeno una foglia
             push!(clauses, reduce(∨, leaf_vars))
@@ -272,8 +256,8 @@ function solveMinDepthOptimalDT(features_train, labels_train, max_depth_limit = 
             status = sat!(clauses_expr, solver = Z3())
 
             if status == :SAT
-                println("Soluzione trovata a profondità $depth!")
-                return decodeSolution(t, a, s, z, g, features_train, labels_train, Al, Ar)
+                println("Soluzione trovata a profondità $depth !")
+                return decodeSolution(t, a, s, z, g, features_train, labels_train, Al, Ar, label_to_idx, idx_to_label)
             else
                 println("Nessuna soluzione a profondità $depth")
             end
