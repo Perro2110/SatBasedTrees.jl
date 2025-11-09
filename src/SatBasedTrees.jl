@@ -361,24 +361,33 @@ end
 """
 Decodifica la soluzione SAT in un albero decisionale leggibile
 """
-function decodeSolution(t, a, s, z, g, features_train, labels_train, Al, Ar)
+function decodeSolution(t, a, s, z, g, features_train, labels_train, Al, Ar, label_to_idx, idx_to_label)
     println("=== DECODIFICA SOLUZIONE ===")
+
+    # Raccogli gli ID dei nodi interni e delle foglie
+    internal_node_ids = [node.t for (node_id, node) in t if node.leaf == false]
+    leaf_ids = [node.t for (node_id, node) in t if node.leaf]
+    max_r = size(features_train, 1)
+    max_c = size(features_train, 2)
+    n_labels = length(idx_to_label)
 
     # Decodifica feature selection (β)
     beta = Dict{Int,Int}()
     println("Feature selezionate per ogni nodo:")
-    for (key, var) in a
-        if value(var) == true
-            node_t, feature_j = key
-            beta[node_t] = feature_j
-            println("  Nodo $node_t -> Feature $feature_j")
+    for node_t in internal_node_ids
+        for j in 1:max_c
+            if value(a[node_t, j]) == true
+                beta[node_t] = j
+                println("  Nodo $node_t -> Feature $j")
+                break
+            end
         end
     end
 
     # Decodifica soglie (α)
     alpha = Dict{Int,Float64}()
     println("\nSoglie calcolate:")
-    for node_t in keys(beta)
+    for node_t in internal_node_ids
         if haskey(beta, node_t)
             feature_j = beta[node_t]
             sorted_indices = sortperm(features_train[:, feature_j])
@@ -389,18 +398,13 @@ function decodeSolution(t, a, s, z, g, features_train, labels_train, Al, Ar)
                 curr_idx = sorted_indices[i]
                 prev_idx = sorted_indices[i-1]
 
-                if haskey(s, (prev_idx, node_t)) && haskey(s, (curr_idx, node_t))
-                    if value(s[(prev_idx, node_t)]) == true &&
-                       value(s[(curr_idx, node_t)]) == false
-                        alpha[node_t] =
-                            (
-                                features_train[prev_idx, feature_j] +
-                                features_train[curr_idx, feature_j]
-                            ) / 2
-                        println("  Nodo $node_t -> Soglia $(alpha[node_t])")
-                        split_found = true
-                        break
-                    end
+                if value(s[prev_idx, node_t]) == true &&
+                   value(s[curr_idx, node_t]) == false
+                    alpha[node_t] = (features_train[prev_idx, feature_j] +
+                                    features_train[curr_idx, feature_j]) / 2
+                    println("  Nodo $node_t -> Soglia $(alpha[node_t])")
+                    split_found = true
+                    break
                 end
             end
 
@@ -408,7 +412,7 @@ function decodeSolution(t, a, s, z, g, features_train, labels_train, Al, Ar)
                 # Fallback: usa il valore massimo che va a sinistra
                 max_left_value = -Inf
                 for i in sorted_indices
-                    if haskey(s, (i, node_t)) && value(s[(i, node_t)]) == true
+                    if value(s[i, node_t]) == true
                         max_left_value = max(max_left_value, features_train[i, feature_j])
                     end
                 end
@@ -418,49 +422,47 @@ function decodeSolution(t, a, s, z, g, features_train, labels_train, Al, Ar)
                 end
             end
         end
-
-        # Restituisce i risultati della decodifica
-        return alpha # DA SISTEMARE
     end
 
     # Decodifica etichette foglie (θ)
     theta = Dict{Int,String}()
     println("\nEtichette delle foglie:")
-    for (key, var) in g
-        if value(var) == true
-            leaf_t, label_c = key
-            theta[leaf_t] = label_c
-            println("  Foglia $leaf_t -> Etichetta $label_c")
+    for leaf_t in leaf_ids
+        ll = leaf_t - 2^(floor(Int, log2(leaf_t + 1))) + 1
+        for c_idx in 1:n_labels
+            if value(g[ll, c_idx]) == true
+                label_str = idx_to_label[c_idx]  # Converti indice -> label stringa
+                theta[leaf_t] = label_str
+                println("  Foglia $ll -> Etichetta $label_str")
+                break
+            end
         end
     end
 
     # Verifica accuratezza
     correct = 0
     println("\nClassificazione dei punti:")
-    for ind = 1:size(features_train, 1)
-        for (key, var) in z
-            if key[1] == ind && value(var) == true
-                leaf_t = key[2]
+    for ind = 1:max_r
+        for leaf_t in leaf_ids
+            ll = leaf_t - 2^(floor(Int, log2(leaf_t + 1))) + 1
+            if value(z[ind, ll]) == true
                 predicted = get(theta, leaf_t, "UNKNOWN")
                 actual = labels_train[ind]
                 is_correct = predicted == actual
                 if is_correct
                     correct += 1
                 end
-                println(
-                    "  Punto $ind: predetto=$predicted, reale=$actual, corretto=$is_correct",
-                )
+                println("  Punto $ind: predetto=$predicted, reale=$actual, corretto=$is_correct")
                 break
             end
         end
     end
 
     accuracy = correct / length(labels_train)
-    println(
-        "\nAccuratezza: $correct/$(length(labels_train)) = $(round(accuracy*100, digits=2))%",
-    )
+    println("\nAccuratezza: $correct/$(length(labels_train)) = $(round(accuracy*100, digits=2))%")
 
-    return accuracy
+    # Restituisce i risultati della decodifica
+    return (beta = beta, alpha = alpha, theta = theta, accuracy = accuracy)
 end
 
 # -------------------------------------------------------------------------------------------------
