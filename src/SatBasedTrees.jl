@@ -1,4 +1,3 @@
-#aaa
 using Satisfiability
 using AbstractTrees
 using Random
