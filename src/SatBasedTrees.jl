@@ -428,7 +428,7 @@ function decodeSolution(t, a, s, z, g, features_train, labels_train, Al, Ar, lab
     theta = Dict{Int,String}()
     println("\nEtichette delle foglie:")
     for leaf_t in leaf_ids
-        ll = leaf_t - 2^(floor(Int, log2(leaf_t + 1))) + 1
+        ll = leaf_t - (2^(floor(Int, log2(leaf_t + 1))) - 1) + 1
         for c_idx in 1:n_labels
             if value(g[ll, c_idx]) == true
                 label_str = idx_to_label[c_idx]  # Converti indice -> label stringa
@@ -444,7 +444,7 @@ function decodeSolution(t, a, s, z, g, features_train, labels_train, Al, Ar, lab
     println("\nClassificazione dei punti:")
     for ind = 1:max_r
         for leaf_t in leaf_ids
-            ll = leaf_t - 2^(floor(Int, log2(leaf_t + 1))) + 1
+            ll = leaf_t - (2^(floor(Int, log2(leaf_t + 1))) - 1) + 1
             if value(z[ind, ll]) == true
                 predicted = get(theta, leaf_t, "UNKNOWN")
                 actual = labels_train[ind]
