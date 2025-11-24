@@ -20,6 +20,12 @@ using Satisfiability
 using AbstractTrees
 using Random
 using DelimitedFiles
+using DecisionTree
+using StatsBase
+using SoleDecisionTreeInterface
+
+import DecisionTree: Node, Leaf, print_tree
+import Satisfiability: ∨, ∧, ¬, sat!, @satvariable, BoolExpr, AbstractExpr, value
 
 # Include external dataset loading utilities
 include("loaddataset.jl")
@@ -29,23 +35,23 @@ include("loaddataset.jl")
 =============================================================================#
 
 """
-    Node
+    NodeT
 
 Represents a node in a binary decision tree.
 
 # Fields
-- `t::Int`: Node identifier (BFS numbering: root=1, children of i are 2i and 2i+1)
+- `t::Int`: NodeT identifier (BFS numbering: root=1, children of i are 2i and 2i+1)
 - `leaf::Bool`: Whether this is a leaf node
-- `children::Vector{Node}`: Child nodes (empty for leaves)
+- `children::Vector{NodeT}`: Child nodes (empty for leaves)
 """
-struct Node
+struct NodeT
     t::Int
     leaf::Bool
-    children::Vector{Node}
+    children::Vector{NodeT}
 end
 
-# Enable tree traversal for Node
-AbstractTrees.children(node::Node) = node.children
+# Enable tree traversal for NodeT
+AbstractTrees.children(node::NodeT) = node.children
 
 """
     TreeSAT
@@ -53,7 +59,7 @@ AbstractTrees.children(node::Node) = node.children
 Represents a decoded decision tree with learned parameters.
 
 # Fields
-- `t::Int`: Node identifier
+- `t::Int`: NodeT identifier
 - `leaf::Bool`: Whether this is a leaf node
 - `feature::Union{Int,Nothing}`: Index of feature used for splitting (internal nodes only)
 - `threshold::Union{Float64,Nothing}`: Split threshold (internal nodes only)
@@ -95,7 +101,7 @@ end
 =============================================================================#
 
 """
-    complete_tree!(tree::Dict{Int,Node}, max_depth::Int) -> Dict{Int,Node}
+    complete_tree!(tree::Dict{Int,NodeT}, max_depth::Int) -> Dict{Int,NodeT}
 
 Create a complete binary tree of specified depth with BFS numbering.
 
@@ -105,26 +111,26 @@ Nodes are numbered in breadth-first order:
 - Leaves are at depth `max_depth` with IDs from 2^max_depth to 2^(max_depth+1)-1
 
 # Arguments
-- `tree::Dict{Int,Node}`: Dictionary to populate with nodes (modified in-place)
+- `tree::Dict{Int,NodeT}`: Dictionary to populate with nodes (modified in-place)
 - `max_depth::Int`: Depth of the tree (root has depth 0)
 
 # Returns
-- `Dict{Int,Node}`: The populated tree dictionary
+- `Dict{Int,NodeT}`: The populated tree dictionary
 """
-function complete_tree!(tree::Dict{Int,Node}, max_depth::Int)::Dict{Int,Node}
+function complete_tree!(tree::Dict{Int,NodeT}, max_depth::Int)::Dict{Int,NodeT}
     # Create leaf nodes at the deepest level
     leaf_start = 2^max_depth
     leaf_end = 2^(max_depth + 1) - 1
 
     for node_id in leaf_start:leaf_end
-        tree[node_id] = Node(node_id, true, Node[])
+        tree[node_id] = NodeT(node_id, true, NodeT[])
     end
 
     # Create internal nodes from bottom to top
     for node_id in (leaf_start - 1):-1:1
         left_child = tree[2 * node_id]
         right_child = tree[2 * node_id + 1]
-        tree[node_id] = Node(node_id, false, [left_child, right_child])
+        tree[node_id] = NodeT(node_id, false, [left_child, right_child])
     end
 
     return tree
@@ -135,7 +141,7 @@ end
 =============================================================================#
 
 """
-    compute_left_ancestors(tree::Dict{Int,Node}, leaves::Vector{Node}) -> Dict{Int,Vector{Int}}
+    compute_left_ancestors(tree::Dict{Int,NodeT}, leaves::Vector{NodeT}) -> Dict{Int,Vector{Int}}
 
 Compute left ancestors for each leaf node.
 
@@ -143,15 +149,15 @@ For each leaf t, Al[t] contains all ancestor nodes from which t is reachable
 via their left branch.
 
 # Arguments
-- `tree::Dict{Int,Node}`: The complete binary tree
-- `leaves::Vector{Node}`: Vector of leaf nodes
+- `tree::Dict{Int,NodeT}`: The complete binary tree
+- `leaves::Vector{NodeT}`: Vector of leaf nodes
 
 # Returns
 - `Dict{Int,Vector{Int}}`: Maps leaf ID to vector of left ancestor IDs
 """
 function compute_left_ancestors(
-    tree::Dict{Int,Node},
-    leaves::Vector{Node}
+    tree::Dict{Int,NodeT},
+    leaves::Vector{NodeT}
 )::Dict{Int,Vector{Int}}
     left_ancestors = Dict{Int,Vector{Int}}()
 
@@ -176,7 +182,7 @@ function compute_left_ancestors(
 end
 
 """
-    compute_right_ancestors(tree::Dict{Int,Node}, leaves::Vector{Node}) -> Dict{Int,Vector{Int}}
+    compute_right_ancestors(tree::Dict{Int,NodeT}, leaves::Vector{NodeT}) -> Dict{Int,Vector{Int}}
 
 Compute right ancestors for each leaf node.
 
@@ -184,15 +190,15 @@ For each leaf t, Ar[t] contains all ancestor nodes from which t is reachable
 via their right branch.
 
 # Arguments
-- `tree::Dict{Int,Node}`: The complete binary tree
-- `leaves::Vector{Node}`: Vector of leaf nodes
+- `tree::Dict{Int,NodeT}`: The complete binary tree
+- `leaves::Vector{NodeT}`: Vector of leaf nodes
 
 # Returns
 - `Dict{Int,Vector{Int}}`: Maps leaf ID to vector of right ancestor IDs
 """
 function compute_right_ancestors(
-    tree::Dict{Int,Node},
-    leaves::Vector{Node}
+    tree::Dict{Int,NodeT},
+    leaves::Vector{NodeT}
 )::Dict{Int,Vector{Int}}
     right_ancestors = Dict{Int,Vector{Int}}()
 
@@ -264,7 +270,7 @@ function solve_min_depth_optimal_dt(
         silent|| println("Attempting depth: $depth")
 
         # Build complete binary tree
-        tree = Dict{Int,Node}()
+        tree = Dict{Int,NodeT}()
         complete_tree!(tree, depth)
         leaves = [node for (_, node) in tree if node.leaf]
 
@@ -448,7 +454,7 @@ end
 
 """
     decode_solution(
-        tree::Dict{Int,Node},
+        tree::Dict{Int,NodeT},
         a, s, z, g,
         features_train::Matrix{T},
         labels_train::Vector{String},
@@ -466,7 +472,7 @@ Decodes the Boolean variable assignments into:
 - θ (theta): Class label for each leaf node
 
 # Arguments
-- `tree::Dict{Int,Node}`: The tree structure
+- `tree::Dict{Int,NodeT}`: The tree structure
 - `a, s, z, g`: SAT variable assignments
 - `features_train`: Training features
 - `labels_train`: Training labels
@@ -477,7 +483,7 @@ Decodes the Boolean variable assignments into:
 - `DecodedSolution`: Decoded tree parameters with accuracy
 """
 function decode_solution(
-    tree::Dict{Int,Node},
+    tree::Dict{Int,NodeT},
     a, s, z, g,
     features_train::Matrix{T},
     labels_train::Vector{String},
@@ -504,7 +510,7 @@ function decode_solution(
         for j in 1:n_features
             if value(a[node_t, j]) == true
                 beta[node_t] = j
-                silent|| println("  Node $node_t → Feature $j")
+                silent|| println("  NodeT $node_t → Feature $j")
                 break
             end
         end
@@ -534,7 +540,7 @@ function decode_solution(
                         features_train[curr_idx, feature_j]
                     ) / 2.0
 
-                    silent|| println("  Node $node_t → Threshold $(alpha[node_t])")
+                    silent|| println("  NodeT $node_t → Threshold $(alpha[node_t])")
                     split_found = true
                     break
                 end
@@ -551,7 +557,7 @@ function decode_solution(
 
                 if max_left_value != -Inf
                     alpha[node_t] = max_left_value
-                    silent|| println("  Node $node_t → Threshold $(alpha[node_t]) (fallback)")
+                    silent|| println("  NodeT $node_t → Threshold $(alpha[node_t]) (fallback)")
                 end
             end
         end
@@ -670,6 +676,74 @@ function build_tree_sat(
     return nodes
 end
 
+"""
+    majority(val::Union{Vector{String}, Vector{Char}, Char, String})::Union{String, Char}
+
+Determine the majority label from a vector of labels.
+
+# Arguments
+- `val::Union{Vector{String}, Vector{Char}, Char, String}`: Input labels
+
+# Returns
+- `Union{String, Char}`: The majority label
+
+"""
+function majority(val::Union{Vector{String}, Vector{Char}, Char, String})::Union{String, Char}
+    counts = countmap(val) # using StatsBase
+    max = maximum(collect(values(counts)))
+    for (k, v) in counts
+        if v == max
+            return k
+        end
+    end
+end
+
+"""
+    build_decision_tree(
+        alpha::Dict{Int,Float64},
+        beta::Dict{Int,Int},
+        theta::Dict{Int,String}
+    ) -> Node
+
+
+# Arguments
+- `alpha::Dict{Int,Float64}`: Split thresholds for internal nodes
+- `beta::Dict{Int,Int}`: Feature selections for internal nodes
+- `theta::Dict{Int,String}`: Class labels for leaves
+
+# Returns
+- `Node`: The root node of the constructed decision tree
+"""
+function build_decision_tree(
+    alpha::Dict{Int,Float64},
+    beta::Dict{Int,Int},
+    theta::Dict{Int,String}
+)::Node
+    # sort keys to build tree from bottom up
+    threshold = sort(collect(alpha), by=x->x[1], rev=true)
+    labels = sort(collect(theta), by=x->x[1], rev=true)
+    max_depth = floor(Int, log2(maximum(union(keys(alpha), union(keys(beta), keys(theta)))) + 1)) - 1
+
+    n = Dict{Int, Union{Node, Leaf}}()
+    # First create the leaf nodes
+    for (key, values) in labels
+        maj = majority(values)
+        n[key] = Leaf("$maj", [values])
+    end
+    # Then create internal nodes from bottom up
+    for (key, values) in threshold
+        if haskey(n, 2*key) && haskey(n, 2*key+1)
+           n[key] = Node(beta[key], values, n[2*key], n[2*key+1])
+        elseif haskey(n, 2*key) # only left child
+            n[key] = Node(beta[key], values, n[2*key], Leaf("UNKNOWN", ["UNKNOWN"]))
+        elseif haskey(n, 2*key+1) # only right child
+            n[key] = Node(beta[key], values, Leaf("UNKNOWN", ["UNKNOWN"]), n[2*key+1])
+        end
+    end
+    root = n[1]
+    return root
+end
+
 #=============================================================================
     Test Dataset Generation
 =============================================================================#
@@ -777,10 +851,17 @@ function main(;silent::Bool=false)
         silent|| println("\nOptimal tree found!")
 
         # Build and visualize the tree structure
+        silent || println("\nTree Structure:")
         tree_sat = build_tree_sat(solution.alpha, solution.beta, solution.theta)
+        AbstractTrees.print_tree(tree_sat[1])
 
-        silent|| println("\nTree Structure:")
-        print_tree(tree_sat[1])
+        root = build_decision_tree(solution.alpha, solution.beta, solution.theta)
+        silent|| println("\nDecision Tree:")
+        print_tree(root)
+
+        silent || println("\nSole Decision Tree:")
+        sole_tree = solemodel(root)
+        println(sole_tree)
     else
         silent|| println("\nNo solution found within depth limit")
     end
@@ -788,7 +869,8 @@ end
 
 #=============================================================================
     Max-Accuracy Problem (TODO)
-=============================================================================#
+=============================================================================
+NOTICE: We cant implement this function yet because it requires a MaxSAT solver.
 
 """
     solve_max_accuracy_optimal_dt(
@@ -859,7 +941,7 @@ function solve_max_accuracy_optimal_dt(
     silent|| println("  4. Constraint 12: p[i] ↔ (sample i correctly classified)")
 
     # Build tree structure
-    tree = Dict{Int,Node}()
+    tree = Dict{Int,NodeT}()
     complete_tree!(tree, target_depth)
     leaves = [node for (_, node) in tree if node.leaf]
 
@@ -902,7 +984,7 @@ function solve_max_accuracy_optimal_dt(
     return nothing
 end
 
-#=============================================================================
+=============================================================================
     Utility Functions
 =============================================================================#
 
@@ -927,7 +1009,7 @@ function print_tree_info(node::TreeSAT, indent::String="", is_last::Bool=true;si
         feature_str = node.feature !== nothing ? "Feature $(node.feature)" : "No feature"
         threshold_str = node.threshold !== nothing ?
             "Threshold $(round(node.threshold, digits=3))" : "No threshold"
-        silent|| println(indent * connector * "Node $(node.t): $feature_str, $threshold_str")
+        silent|| println(indent * connector * "NodeT $(node.t): $feature_str, $threshold_str")
 
         # Prepare indent for children
         child_indent = indent * (is_last ? "    " : "│   ")
@@ -981,7 +1063,7 @@ function validate_tree_consistency(
             threshold = current_node.threshold
 
             if feature_idx === nothing || threshold === nothing
-                silent|| println("   Warning: Node $(current_node.t) missing parameters")
+                silent|| println("   Warning: NodeT $(current_node.t) missing parameters")
                 all_correct = false
                 break
             end
@@ -1059,7 +1141,7 @@ function export_tree_to_dot(
                 feature_str = node.feature !== nothing ? "F$(node.feature)" : "?"
                 threshold_str = node.threshold !== nothing ?
                     "$(round(node.threshold, digits=2))" : "?"
-                label = "Node $(node.t)\\n$feature_str ≤ $threshold_str"
+                label = "NodeT $(node.t)\\n$feature_str ≤ $threshold_str"
                 silent|| println(io, "    node$node_id [label=\"$label\", fillcolor=lightblue, style=filled];")
 
                 # Add edges to children
